@@ -1,63 +1,56 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useMemo, useState } from "react";
 import { FileText, Loader2, Search, Trash2, Upload } from "lucide-react";
+import { useAction, useMutation, useQuery } from "convex/react";
+import { api } from "../../convex/_generated/api";
+import { Doc, Id } from "../../convex/_generated/dataModel";
 import { Logo } from "./Logo";
 
-type Chunk = {
-  id: string;
-  text: string;
-  pageNumber: number;
-};
-
-type KnowledgeDocument = {
-  id: string;
-  name: string;
-  size: number;
-  pageCount: number;
-  chunks: Chunk[];
-  createdAt: number;
-};
-
-type ChatMessage = {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  sources?: Array<{
-    documentName: string;
-    pageNumber?: number;
-    text: string;
-  }>;
-};
-
-const STORAGE_KEY = "documind-local-kb";
+const EMPTY_DOCUMENTS: Doc<"documents">[] = [];
+const EMPTY_CONVERSATIONS: Doc<"conversations">[] = [];
 
 export function PDFQaApp() {
-  const [documents, setDocuments] = useState<KnowledgeDocument[]>([]);
-  const [selectedDocumentId, setSelectedDocumentId] = useState<string>("all");
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const documents = useQuery(api.documents.listDocuments) ?? EMPTY_DOCUMENTS;
+  const conversations = useQuery(api.conversations.listConversations) ?? EMPTY_CONVERSATIONS;
+  const [selectedDocumentId, setSelectedDocumentId] = useState<Id<"documents"> | "all">("all");
   const [question, setQuestion] = useState("");
   const [isUploading, setIsUploading] = useState(false);
   const [isAnswering, setIsAnswering] = useState(false);
-  const [uploadStatus, setUploadStatus] = useState<string>("");
+  const [statusText, setStatusText] = useState("");
 
-  useEffect(() => {
-    const saved = window.localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      setDocuments(JSON.parse(saved));
-    }
-  }, []);
-
-  useEffect(() => {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(documents));
-  }, [documents]);
+  const generateUploadUrl = useMutation(api.documents.generateUploadUrl);
+  const saveDocument = useMutation(api.documents.saveDocument);
+  const deleteDocument = useMutation(api.documents.deleteDocument);
+  const createConversation = useMutation(api.conversations.createConversation);
+  const ingestDocument = useAction(api.ingest.ingestDocument);
+  const sendMessage = useAction(api.messagesNode.sendMessage);
 
   const selectedDocuments = useMemo(() => {
     if (selectedDocumentId === "all") {
       return documents;
     }
-    return documents.filter((document) => document.id === selectedDocumentId);
+
+    return documents.filter((document: Doc<"documents">) => document._id === selectedDocumentId);
   }, [documents, selectedDocumentId]);
+
+  const activeConversation = useMemo(() => {
+    if (selectedDocumentId === "all") {
+      return conversations.find((conversation: Doc<"conversations">) => !conversation.documentId) ?? null;
+    }
+
+    return (
+      conversations.find(
+        (conversation: Doc<"conversations">) => conversation.documentId === selectedDocumentId
+      ) ?? null
+    );
+  }, [conversations, selectedDocumentId]);
+
+  const messages =
+    useQuery(
+      api.messages.getMessages,
+      activeConversation ? { conversationId: activeConversation._id } : "skip"
+    ) ?? [];
 
   async function handleUpload(files: FileList | null) {
     if (!files || files.length === 0) {
@@ -65,33 +58,46 @@ export function PDFQaApp() {
     }
 
     setIsUploading(true);
-    setUploadStatus("Extracting PDF text...");
+    setStatusText("Uploading PDFs to Convex...");
 
     try {
-      const nextDocuments: KnowledgeDocument[] = [];
-
       for (const file of Array.from(files)) {
-        const formData = new FormData();
-        formData.append("file", file);
+        if (file.type !== "application/pdf") {
+          throw new Error(`${file.name} is not a PDF file.`);
+        }
 
-        const response = await fetch("/api/ingest", {
+        const uploadUrl = await generateUploadUrl();
+        const response = await fetch(uploadUrl, {
           method: "POST",
-          body: formData,
+          headers: {
+            "Content-Type": file.type,
+          },
+          body: file,
         });
 
         if (!response.ok) {
-          throw new Error(await response.text());
+          throw new Error(`Failed to upload ${file.name}`);
         }
 
-        const document = (await response.json()) as KnowledgeDocument;
-        nextDocuments.push(document);
+        const { storageId } = (await response.json()) as { storageId: Id<"_storage"> };
+        const documentId = await saveDocument({
+          name: file.name,
+          storageId,
+          size: file.size,
+        });
+
+        setSelectedDocumentId(documentId);
+        setStatusText(`Indexing ${file.name}...`);
+
+        await ingestDocument({
+          documentId,
+          storageId,
+        });
       }
 
-      setDocuments((current) => [...nextDocuments, ...current]);
-      setSelectedDocumentId(nextDocuments[0]?.id ?? "all");
-      setUploadStatus("PDF knowledge base updated.");
+      setStatusText("PDF knowledge base updated in Convex.");
     } catch (error) {
-      setUploadStatus(error instanceof Error ? error.message : "Upload failed");
+      setStatusText(error instanceof Error ? error.message : "Upload failed.");
     } finally {
       setIsUploading(false);
     }
@@ -103,57 +109,45 @@ export function PDFQaApp() {
       return;
     }
 
-    const userMessage: ChatMessage = {
-      id: crypto.randomUUID(),
-      role: "user",
-      content: trimmedQuestion,
-    };
-
-    setMessages((current) => [...current, userMessage]);
     setQuestion("");
     setIsAnswering(true);
 
     try {
-      const response = await fetch("/api/answer", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          question: trimmedQuestion,
-          documents: selectedDocuments,
-        }),
-      });
+      let conversationId = activeConversation?._id;
 
-      if (!response.ok) {
-        throw new Error(await response.text());
+      if (!conversationId) {
+        conversationId = await createConversation({
+          title:
+            selectedDocumentId === "all"
+              ? "Q&A Across PDFs"
+              : `Q&A: ${selectedDocuments[0]?.name ?? "Document"}`,
+          documentId: selectedDocumentId === "all" ? undefined : selectedDocumentId,
+        });
       }
 
-      const answer = (await response.json()) as ChatMessage;
-      setMessages((current) => [...current, answer]);
+      await sendMessage({
+        conversationId,
+        content: trimmedQuestion,
+        documentId: selectedDocumentId === "all" ? undefined : selectedDocumentId,
+      });
     } catch (error) {
-      setMessages((current) => [
-        ...current,
-        {
-          id: crypto.randomUUID(),
-          role: "assistant",
-          content:
-            error instanceof Error
-              ? error.message
-              : "I could not answer that question right now.",
-        },
-      ]);
+      setStatusText(error instanceof Error ? error.message : "Failed to answer question.");
     } finally {
       setIsAnswering(false);
     }
   }
 
-  function removeDocument(documentId: string) {
-    setDocuments((current) => current.filter((document) => document.id !== documentId));
+  async function handleDeleteDocument(documentId: Id<"documents">) {
+    await deleteDocument({ documentId });
+
     if (selectedDocumentId === documentId) {
       setSelectedDocumentId("all");
     }
   }
+
+  const hasReadySelection =
+    selectedDocuments.length > 0 &&
+    selectedDocuments.every((document: Doc<"documents">) => document.status === "ready");
 
   return (
     <div className="min-h-screen">
@@ -161,7 +155,7 @@ export function PDFQaApp() {
         <aside className="card-base w-full lg:w-[320px] lg:self-start">
           <div className="mb-6 flex items-center justify-between gap-3">
             <Logo size="medium" showText={true} />
-            <span className="status-ready">Local Q&A</span>
+            <span className="status-ready">Convex Q&A</span>
           </div>
 
           <label className="drag-zone block">
@@ -170,7 +164,7 @@ export function PDFQaApp() {
               accept="application/pdf,.pdf"
               multiple
               className="hidden"
-              onChange={(event) => handleUpload(event.target.files)}
+              onChange={(event) => void handleUpload(event.target.files)}
               disabled={isUploading}
             />
             <div className="flex flex-col items-center gap-3">
@@ -184,14 +178,14 @@ export function PDFQaApp() {
                   {isUploading ? "Uploading PDFs..." : "Upload PDFs"}
                 </p>
                 <p className="mt-1 text-sm text-gray-500">
-                  Build the knowledge base directly in this browser session.
+                  Store PDFs and indexed chunks in Convex.
                 </p>
               </div>
             </div>
           </label>
 
-          {uploadStatus ? (
-            <p className="mt-3 text-sm text-gray-600">{uploadStatus}</p>
+          {statusText ? (
+            <p className="mt-3 text-sm text-gray-600">{statusText}</p>
           ) : null}
 
           <div className="mt-6">
@@ -213,13 +207,13 @@ export function PDFQaApp() {
                 </div>
               ) : null}
 
-              {documents.map((document) => (
+              {documents.map((document: Doc<"documents">) => (
                 <div
-                  key={document.id}
+                  key={document._id}
                   className={`card-base cursor-pointer p-4 transition-all ${
-                    selectedDocumentId === document.id ? "ring-2 ring-[var(--brand-primary)]" : ""
+                    selectedDocumentId === document._id ? "ring-2 ring-[var(--brand-primary)]" : ""
                   }`}
-                  onClick={() => setSelectedDocumentId(document.id)}
+                  onClick={() => setSelectedDocumentId(document._id)}
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0 flex-1">
@@ -228,15 +222,30 @@ export function PDFQaApp() {
                         <p className="truncate font-medium">{document.name}</p>
                       </div>
                       <p className="mt-2 text-xs text-gray-500">
-                        {document.pageCount} pages • {document.chunks.length} chunks
+                        {(document.size / 1024).toFixed(1)} KB
                       </p>
+                      <div className="mt-2">
+                        <span
+                          className={
+                            document.status === "ready"
+                              ? "status-ready"
+                              : document.status === "processing"
+                                ? "status-processing"
+                                : document.status === "error"
+                                  ? "status-error"
+                                  : "status-pending"
+                          }
+                        >
+                          {document.status}
+                        </span>
+                      </div>
                     </div>
                     <button
                       type="button"
                       className="btn-ghost-danger p-2"
-                      onClick={(event) => {
+                      onClick={async (event) => {
                         event.stopPropagation();
-                        removeDocument(document.id);
+                        await handleDeleteDocument(document._id);
                       }}
                     >
                       <Trash2 size={14} />
@@ -252,7 +261,7 @@ export function PDFQaApp() {
           <div className="border-b border-[var(--brand-accent-light)] px-6 py-5">
             <h1 className="heading-serif text-2xl">PDF Question & Answer</h1>
             <p className="mt-2 text-sm text-gray-600">
-              Ask grounded questions against your uploaded PDFs. The answer will use only the selected knowledge base.
+              Ask grounded questions against PDFs stored in Convex. Answers use only the selected document context.
             </p>
           </div>
 
@@ -262,13 +271,13 @@ export function PDFQaApp() {
                 <Logo size="large" showText={false} />
                 <h2 className="heading-serif mt-4 text-xl">Ask from your PDFs</h2>
                 <p className="mt-2 max-w-xl text-gray-500">
-                  Upload one or more PDFs, select a document or search across all of them, then ask factual questions,
-                  summaries, or section-specific queries.
+                  Upload one or more PDFs to Convex, select a document or search across all of them, then ask factual
+                  questions, summaries, or section-specific queries.
                 </p>
               </div>
             ) : (
-              messages.map((message) => (
-                <div key={message.id} className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}>
+              messages.map((message: Doc<"messages">) => (
+                <div key={message._id} className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}>
                   <div className={message.role === "user" ? "bubble-user" : "bubble-assistant"}>
                     <p className="whitespace-pre-wrap">{message.content}</p>
                     {message.sources && message.sources.length > 0 ? (
@@ -309,6 +318,12 @@ export function PDFQaApp() {
                 : `Searching in ${selectedDocuments[0]?.name ?? "selected PDF"}`}
             </div>
             <div className="flex flex-col gap-3">
+              {!selectedDocuments.every((document: Doc<"documents">) => document.status === "ready") &&
+              selectedDocuments.length > 0 ? (
+                <p className="text-sm text-amber-700">
+                  Wait for the selected PDF to finish indexing before asking questions.
+                </p>
+              ) : null}
               <textarea
                 className="textarea-base w-full"
                 placeholder="Ask a question about the uploaded PDFs..."
@@ -320,14 +335,14 @@ export function PDFQaApp() {
                     void handleAsk();
                   }
                 }}
-                disabled={isAnswering || selectedDocuments.length === 0}
+                disabled={isAnswering || !hasReadySelection}
               />
               <div className="flex justify-end">
                 <button
                   className="btn-primary"
                   type="button"
                   onClick={() => void handleAsk()}
-                  disabled={isAnswering || selectedDocuments.length === 0 || !question.trim()}
+                  disabled={isAnswering || !hasReadySelection || !question.trim()}
                 >
                   Ask Question
                 </button>

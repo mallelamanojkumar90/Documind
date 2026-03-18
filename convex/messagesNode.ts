@@ -3,7 +3,16 @@
 import { action } from "./_generated/server";
 import { v } from "convex/values";
 import { internal } from "./_generated/api";
+import { Id } from "./_generated/dataModel";
 import { generateChatCompletion } from "./lib/groq";
+
+type RetrievedChunk = {
+  text: string;
+  chunkIndex: number;
+  pageNumber?: number;
+  documentName: string;
+  similarity: number;
+};
 
 export const sendMessage = action({
   args: {
@@ -19,11 +28,11 @@ export const sendMessage = action({
       createdAt: Date.now(),
     });
 
-    const chunks = await ctx.runAction(internal.chunks.similaritySearch, {
+    const chunks = (await ctx.runAction(internal.chunks.similaritySearch, {
       queryText: args.content,
       documentId: args.documentId,
       limit: 5,
-    });
+    })) as RetrievedChunk[];
 
     if (chunks.length === 0) {
       const noAnswerText =
@@ -46,7 +55,7 @@ export const sendMessage = action({
 
     const contextText = chunks
       .map(
-        (chunk: any, index: number) =>
+        (chunk: RetrievedChunk, index: number) =>
           `[Source ${index + 1}${chunk.pageNumber ? ` Page ${chunk.pageNumber}` : ""}]: ${chunk.text}`
       )
       .join("\n\n");
@@ -67,8 +76,8 @@ Be concise, accurate, and helpful.`;
     });
 
     const conversationHistory = messages
-      .filter((message: any) => message._id !== userMessageId)
-      .map((message: any) => ({
+      .filter((message: { _id: Id<"messages">; role: "user" | "assistant"; content: string }) => message._id !== userMessageId)
+      .map((message: { role: "user" | "assistant"; content: string }) => ({
         role: message.role as "user" | "assistant",
         content: message.content,
       }));
@@ -80,7 +89,7 @@ Be concise, accurate, and helpful.`;
 
     const responseText = await generateChatCompletion(systemPrompt, conversationHistory);
 
-    const sources = chunks.map((chunk: any) => ({
+    const sources = chunks.map((chunk: RetrievedChunk) => ({
       documentName: chunk.documentName,
       chunkText: chunk.text,
       pageNumber: chunk.pageNumber,

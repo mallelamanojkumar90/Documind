@@ -6,6 +6,17 @@ import { internal } from "./_generated/api";
 import pdfParse from "pdf-parse";
 import { chunkPages } from "./lib/chunker";
 
+function normalizeExtractedText(text: string): string {
+  return text
+    .replace(/\r/g, "\n")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/-\n(?=\w)/g, "")
+    .replace(/(?<!\n)\n(?!\n)/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 /**
  * Ingest a PDF into the knowledge base by extracting text, chunking it,
  * generating embeddings, and storing the chunks for retrieval.
@@ -34,18 +45,24 @@ export const ingestDocument = action({
 
       const rawPages = pdfData.text
         .split(/\f|\x0c/)
-        .map((text, index) => ({
-          text: text.trim(),
+        .map((text: string, index: number) => ({
+          text: normalizeExtractedText(text),
           pageNumber: index + 1,
         }))
-        .filter((page) => page.text.length > 0);
+        .filter((page: { text: string; pageNumber: number }) => page.text.length > 0);
 
       const pages =
         rawPages.length > 0
           ? rawPages
-          : [{ text: pdfData.text.trim(), pageNumber: 1 }].filter((page) => page.text.length > 0);
+          : [{ text: normalizeExtractedText(pdfData.text), pageNumber: 1 }].filter(
+              (page: { text: string; pageNumber: number }) => page.text.length > 0
+            );
 
       const chunks = chunkPages(pages, 500, 50);
+
+      if (chunks.length === 0) {
+        throw new Error("No extractable text was found in this PDF.");
+      }
 
       const embeddedChunks = await Promise.all(
         chunks.map(async (chunk) => ({

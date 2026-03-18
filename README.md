@@ -1,33 +1,49 @@
 # DocuMind
 
-DocuMind is a local PDF question-answering app built with Next.js. You can upload one or more PDFs, use them as a knowledge base, and ask grounded questions with cited source snippets.
+DocuMind is a PDF question-answering app built with Next.js and Convex. Upload PDFs, let the app index them into chunks, and ask grounded questions against a single document or across your full document set.
 
 ## What It Does
 
-- Upload PDFs directly from the browser
-- Extract text from each PDF with `pdf-parse`
-- Split document text into smaller chunks for retrieval
-- Search the uploaded PDF knowledge base with local text matching
-- Generate answers from relevant PDF excerpts
-- Show cited source PDFs and page numbers alongside answers
+- Upload PDFs from the browser into Convex storage
+- Extract and chunk PDF text for retrieval
+- Store documents, chunks, conversations, and messages in Convex
+- Ask questions against one selected PDF or across all uploaded PDFs
+- Return answers with cited source documents and page references
 
-## Current Architecture
+## Architecture
 
 - Frontend: Next.js 14 App Router
-- Ingestion API: `src/app/api/ingest/route.ts`
-- Answer API: `src/app/api/answer/route.ts`
+- Realtime backend and storage: Convex
 - Main UI: `src/components/PDFQaApp.tsx`
+- Convex provider: `src/components/ConvexClientProvider.tsx`
+- Convex functions: `convex/`
 - Styling: `src/app/globals.css`
-
-The current app stores the uploaded PDF knowledge base in browser local storage. That keeps the setup simple and avoids deployment issues with external backend services.
 
 ## Requirements
 
 - Node.js 18+
 - npm
-- Optional: `GROQ_API_KEY` in `.env.local` if you want LLM-generated answers
+- A running Convex deployment
+- Environment variables in `.env.local`
 
-If `GROQ_API_KEY` is not set, the app can still surface the relevant PDF excerpts, but answer generation quality will be limited.
+## Environment Variables
+
+Create `.env.local` with the values for your Convex deployment and LLM provider:
+
+```bash
+NEXT_PUBLIC_CONVEX_URL=your_convex_url
+CONVEX_DEPLOYMENT=your_convex_deployment
+
+# LLM provider: groq | openai | anthropic | cohere
+LLM_PROVIDER=groq
+
+GROQ_API_KEY=your_key_here
+OPENAI_API_KEY=
+ANTHROPIC_API_KEY=
+COHERE_API_KEY=
+
+NEXT_PUBLIC_CONVEX_SITE_URL=your_convex_site_url
+```
 
 ## Run Locally
 
@@ -37,13 +53,13 @@ If `GROQ_API_KEY` is not set, the app can still surface the relevant PDF excerpt
 npm install
 ```
 
-2. Optionally create `.env.local`:
+2. Start Convex in one terminal if it is not already running:
 
 ```bash
-GROQ_API_KEY=your_key_here
+npx convex dev
 ```
 
-3. Start the app:
+3. Start the Next.js app in another terminal:
 
 ```bash
 npm run dev
@@ -59,32 +75,39 @@ http://localhost:3000
 
 1. Open the homepage
 2. Upload one or more PDF files
-3. Select a specific PDF or search across all uploaded PDFs
-4. Ask a question in the input box
-5. Review the answer and the cited source references
+3. Wait for indexing to complete
+4. Select one PDF or choose all PDFs
+5. Ask a question and review the cited sources in the response
 
 ## Project Structure
 
 ```text
+convex/
+  chunks.ts
+  conversations.ts
+  documents.ts
+  ingest.ts
+  messages.ts
+  messagesNode.ts
+  schema.ts
+
 src/
   app/
-    api/
-      answer/route.ts
-      ingest/route.ts
     chat/[conversationId]/page.tsx
     globals.css
     layout.tsx
     page.tsx
   components/
+    ConvexClientProvider.tsx
     Logo.tsx
     PDFQaApp.tsx
 ```
 
 ## Notes
 
-- Uploaded PDFs are stored only in the browser for now
-- Refreshing the page keeps the local knowledge base if local storage is preserved
-- This version intentionally avoids relying on Convex for the active app flow
+- PDFs and indexed data are stored in Convex, not browser local storage
+- The app depends on Convex being available before the frontend can query data
+- LLM responses depend on the configured provider and API key
 
 ## License
 

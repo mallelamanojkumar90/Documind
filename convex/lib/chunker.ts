@@ -9,6 +9,20 @@ interface Chunk {
   pageNumber?: number;
 }
 
+function splitIntoUnits(text: string): string[] {
+  const paragraphs = text
+    .split(/\n\s*\n/)
+    .map((part) => part.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+
+  const units = paragraphs.flatMap((paragraph) => {
+    const sentences = paragraph.match(/[^.!?]+[.!?]+(?=\s|$)|[^.!?]+$/g);
+    return (sentences ?? [paragraph]).map((sentence) => sentence.trim()).filter(Boolean);
+  });
+
+  return units.length > 0 ? units : [text.replace(/\s+/g, " ").trim()].filter(Boolean);
+}
+
 /**
  * Estimate token count using whitespace-based heuristic
  * (1 token ≈ 4 characters for English text)
@@ -33,47 +47,83 @@ export function chunkText(
   pageNumber?: number
 ): Chunk[] {
   const chunks: Chunk[] = [];
+  const cleanedText = text.replace(/\s+/g, " ").trim();
 
-  if (!text || text.trim().length === 0) {
+  if (!cleanedText) {
     return chunks;
   }
 
-  // Split into sentences for better boundaries
-  const sentences = text.match(/[^.!?]+[.!?]+(\s|$)/g) || [text];
+  const units = splitIntoUnits(cleanedText);
 
   let currentChunk = "";
   let currentTokens = 0;
   let chunkIndex = 0;
-  let sentenceIndex = 0;
+  let unitIndex = 0;
 
-  while (sentenceIndex < sentences.length) {
-    const sentence = sentences[sentenceIndex].trim();
-    const sentenceTokens = estimateTokenCount(sentence);
+  while (unitIndex < units.length) {
+    const unit = units[unitIndex];
+    const unitTokens = estimateTokenCount(unit);
 
-    if (currentTokens + sentenceTokens <= chunkSize) {
-      // Add sentence to current chunk
-      currentChunk += sentence + " ";
-      currentTokens += sentenceTokens;
-      sentenceIndex++;
-    } else {
-      // Current chunk is full, save it
-      if (currentChunk.trim().length > 0) {
-        chunks.push({
-          text: currentChunk.trim(),
-          chunkIndex,
-          pageNumber,
-        });
-        chunkIndex++;
+    if (currentTokens + unitTokens <= chunkSize) {
+      currentChunk += unit + " ";
+      currentTokens += unitTokens;
+      unitIndex++;
+      continue;
+    }
+
+    if (!currentChunk.trim()) {
+      const words = unit.split(/\s+/);
+      let sliceStart = 0;
+
+      while (sliceStart < words.length) {
+        let slice = "";
+        let sliceTokens = 0;
+        let sliceEnd = sliceStart;
+
+        while (sliceEnd < words.length) {
+          const nextWord = words[sliceEnd];
+          const nextSlice = slice ? `${slice} ${nextWord}` : nextWord;
+          const nextTokens = estimateTokenCount(nextSlice);
+
+          if (nextTokens > chunkSize && slice) {
+            break;
+          }
+
+          slice = nextSlice;
+          sliceTokens = nextTokens;
+          sliceEnd++;
+
+          if (sliceTokens >= chunkSize) {
+            break;
+          }
+        }
+
+        if (slice.trim()) {
+          chunks.push({
+            text: slice.trim(),
+            chunkIndex,
+            pageNumber,
+          });
+          chunkIndex++;
+        }
+
+        sliceStart = Math.max(sliceStart + 1, sliceEnd - Math.max(1, Math.floor(overlap / 4)));
       }
 
-      // Start new chunk with overlap
+      unitIndex++;
+      currentChunk = "";
+      currentTokens = 0;
+    } else {
+      chunks.push({
+        text: currentChunk.trim(),
+        chunkIndex,
+        pageNumber,
+      });
+      chunkIndex++;
+
       if (overlap > 0 && chunks.length > 0) {
-        // Get last few sentences for overlap
-        const overlapSentences = getOverlapSentences(
-          chunks[Math.max(0, chunks.length - 1)].text,
-          overlap
-        );
-        currentChunk = overlapSentences + " ";
+        const overlapText = getOverlapSentences(chunks[chunks.length - 1].text, overlap);
+        currentChunk = overlapText ? `${overlapText} ` : "";
         currentTokens = estimateTokenCount(currentChunk);
       } else {
         currentChunk = "";
@@ -82,7 +132,6 @@ export function chunkText(
     }
   }
 
-  // Don't forget the last chunk
   if (currentChunk.trim().length > 0) {
     chunks.push({
       text: currentChunk.trim(),
@@ -98,7 +147,7 @@ export function chunkText(
  * Extract last sentences from text to create overlap
  */
 function getOverlapSentences(text: string, targetTokens: number): string {
-  const sentences = text.match(/[^.!?]+[.!?]+(\s|$)/g) || [text];
+  const sentences = splitIntoUnits(text);
 
   let overlapText = "";
   let overlapTokens = 0;
